@@ -64,14 +64,13 @@ class myConfig():
     Handles program configuration
     Uses ConfigParser to store and retrieve
     """
-    def __init__(self, filename=None, temporary=False, defaultOptions=None):
+    def __init__(self, filename, temporary=False, defaultOptions=None):
         """
         filename    the name of the configuration file
         temporary   whether we are reading and storing values temporarily
         defaultOptions  a dict containing the defaultOptions
         """
         
-        filename = filename or 'config.cfg'
         pDir = os.getcwd()
         if not os.access(pDir, os.W_OK): pDir = os.environ['HOME']
 
@@ -181,7 +180,7 @@ class myConfig():
         return self.GetValue('Options', key)
 
 class WPStatic():
-    def __init__(self, wp_url, static_url, root=None, sitemap='sitemap.xml'):
+    def __init__(self, wp_url, static_url, root=None, sitemap='sitemap.xml', verbose=True, dryrun=False):
         """
         """
         
@@ -189,6 +188,8 @@ class WPStatic():
         self.sitename = urlparse(wp_url).netloc
         self.static_url = static_url
         self.sitemap = sitemap
+        self.verbose = verbose
+        self.dryrun = dryrun
         
         if not root:
             root = os.path.curdir
@@ -225,28 +226,29 @@ class WPStatic():
         
         return pagename
         
-    def spider(self, verbose=False):
+    def spider(self):
         """
         """
 
         if wp.parseSiteMap():
         
-            for url in wp.url_list:
+            for url in wp.url_list: #primary urls, as found in sitemap
 
                 if url not in self.done:
 
-                    if verbose: print ("Fetching page %s" % url)
-                    page = wp.getPage(url, write=True)
+                    if self.verbose: print ("Fetching page %s" % url)
+
+                    in_urls, page = self.getPage(url, write=self.dryrun)
                     self.done.add(url)
 
-                    in_urls = wp.parseURLS( page )
-                    
-                    for url2 in in_urls:
+                    for url2 in in_urls: #secondary urls, as found inside each html
                         if url2 not in self.done:
 
-                            if verbose: print ("Fetching page %s" % url)
-                            page = wp.getPage(url2, write=True)
-                            self.done.add(url)
+                            if self.verbose: print ("Fetching page %s" % url2)
+                            _,page = self.getPage(url2, write=self.dryrun)
+                            self.done.add(url2)
+        else:
+            if self.verbose: print "Sitemap not found or empty"
     
     def getSiteMap(self):
         """
@@ -259,13 +261,13 @@ class WPStatic():
     def parseSiteMap(self):
         """
         """
-        self.url_list = []
+        self.url_list = set()
         
         xml = parseString( self.getSiteMap() )
 
         for url in xml.getElementsByTagName("url"):
             l = url.getElementsByTagName("loc")[0].childNodes[0].nodeValue
-            self.url_list.append (l)
+            self.url_list.add (l)
 
         return len(self.url_list) > 0
     
@@ -303,6 +305,7 @@ class WPStatic():
         fullpath = self.getPath( urlparse(url).path , pagename )
         
         page = urlopen(url).read()
+        in_urls = self.parseURLS( page ) 
         
         if replace: page = self.replace(page)
         
@@ -312,20 +315,30 @@ class WPStatic():
                 fh.write(page)
         
     
-        return page
+        return in_urls, page
+
+    
+    def isAllowed(self, loc):
+        """
+        """
+        allowed=['http', 'https', 'ftp', 'ftps']
+        protocol = loc.split(':')
+        return protocol[0] in allowed or len(protocol) == 1
+
 
     def parseURLS(self, html):
         """
         """
-        local_urls = []
+        local_urls = set()
+        
         parser = URLLister()
         parser.feed(html)
         parser.close()
         for url in parser.urls:
             u = urlparse(url)
             loc, path = u.netloc, u.path
-            if loc in self.wp_url:
-                local_urls.append(url)
+            if loc in self.wp_url and self.isAllowed(loc):
+                local_urls.add(url)
                 
         return local_urls
 
@@ -338,28 +351,31 @@ if __name__ == '__main__':
     parser.add_option('-b', '--blog', dest='blog', metavar="BLOG_URL", help="The URL of your wordpress blog")
     parser.add_option('-s', '--static', dest='static', metavar="STATIC_URL", help="Where your visitors will find the static blog")
     parser.add_option('-r', '--root', dest='root', metavar="root", help="path to the root dir of the static files")
+    parser.add_option('--dryrun', action="store_true", default=False, dest='dryrun', help="Simulates only; will fetch but not write files")
     parser.add_option('--useconfig', action="store_true", default=False, dest='useconfig', help="Use configuration file")
     parser.add_option('--verbose', action="store_true", default=False, dest='verbose', help="Tell me what you are doing")
+#    parser.add_option('--sync', action="store_true", default=False, dest='s3sync', help="Sync the files to the S3 bucket specified in the config file")
 
     (options, args) = parser.parse_args()
+    
     
     if options.blog and options.static:
         blog = options.blog
         static = options.static
-        root = options.root
+        root = options.root or '.'
         fetch = True
 
     elif options.useconfig:
-        config = myConfig()
+        config = myConfig(".pyStaticWPrc")
         blog = config.GetOption('Wordpress_URL')
         static = config.GetOption('Static_URL')
         root = config.GetOption('root')
         fetch = True
-        
+            
     else:
         parser.print_help()
     
     if fetch:
-        wp = WPStatic(blog, static, root)
-        wp.spider(verbose=options.verbose)
+        wp = WPStatic(blog, static, root, verbose=options.verbose, dryrun=options.dryrun)
+        wp.spider()
 
